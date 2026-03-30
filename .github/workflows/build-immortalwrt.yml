@@ -1,4 +1,4 @@
-name: Build ImmortalWrt (RAX3000M eMMC)
+name: Build ImmortalWrt 25.12 (RAX3000M eMMC)
 
 on:
   repository_dispatch:
@@ -8,9 +8,9 @@ permissions:
   contents: write
 
 env:
-  # 使用真正的 ImmortalWrt 源码
+  # 锁定 ImmortalWrt 源码仓库和 25.12 分支
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: master
+  REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
@@ -41,7 +41,7 @@ jobs:
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-    - name: 运行自定义源脚本 (DIY-part1)
+    - name: 加载自定义软件源 (DIY-part1)
       run: |
         chmod +x $DIY_P1_SH
         cd openwrt
@@ -53,7 +53,7 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: 运行系统定制脚本 (DIY-part2)
+    - name: 加载配置并应用补丁 (DIY-part2)
       run: |
         [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
@@ -67,6 +67,7 @@ jobs:
       run: |
         cd openwrt
         make download -j8
+        find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
     - name: 编译固件
@@ -77,29 +78,35 @@ jobs:
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
-    - name: 大扫除：只提取核心固件与软件列表
+    - name: 提取核心固件与软件列表
       id: organize
       if: steps.compile.outputs.status == 'success'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
         
-        # 严格保留指令：只留下 .itb网页升级包、包含 emmc 字样的 .bin线刷包，以及 .manifest软件列表。
-        find . -maxdepth 1 -type f ! -name "*sysupgrade.itb" ! -name "*emmc*.bin" ! -name "*.manifest" -exec rm -f {} +
+        # 提取所有的 .bin, .itb, .img.gz 固件以及清单文件，防止漏掉任何刷机包
+        find . -maxdepth 1 -type f ! -name "*.itb" ! -name "*.bin" ! -name "*.img*" ! -name "*.gz" ! -name "*.manifest" -exec rm -f {} +
         
         echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+        
+    - name: 生成 Release 标签
+      id: tag
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "🚀 RAX3000M eMMC 专属 ImmortalWrt 25.12 编译完成" >> release.txt
+        echo "📦 已包含: OpenClash, AdGuardHome, Docker, 完整USB/5G驱动" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: 发布至 Releases
       uses: softprops/action-gh-release@v2
-      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.tag.outputs.status == 'success' && !cancelled()
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: "RAX3000M_eMMC_${{ github.run_number }}"
-        body: |
-          🚀 ImmortalWrt 最新主干编译完成！
-          📱 机型: CMCC RAX3000M (eMMC)
-          📦 包含: OpenClash, AdGuardHome, Docker, 完整USB与5G驱动
-          📄 安装的全部软件明细请下载下方的 .manifest 文件查看
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
